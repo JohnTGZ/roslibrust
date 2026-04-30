@@ -109,9 +109,15 @@ mod rosapi_discovery;
 use futures_util::stream::{SplitSink, SplitStream};
 use std::collections::HashMap;
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpStream;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::*;
-use tungstenite::Message;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use tungstenite::Message;
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) use ws_stream_wasm::WsMessage as Message;
 
 const SERVICE_TYPE_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -205,7 +211,11 @@ impl<T: RosServiceType> ServiceClient<T> {
 }
 
 /// Our underlying communication socket type (maybe move to comm?)
+#[cfg(not(target_arch = "wasm32"))]
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
+
+#[cfg(target_arch = "wasm32")]
+type Socket = ws_stream_wasm::WsStream;
 
 /// We split our underlying socket into two halves with separate locks on read and write.
 /// This is the read half.
@@ -490,7 +500,19 @@ trait MapError {
 }
 
 // Implementation of conversion from tungstenite error to roslibrust error for a result
+#[cfg(not(target_arch = "wasm32"))]
 impl<T: Send + Sync> MapError for std::result::Result<T, tokio_tungstenite::tungstenite::Error> {
+    type T = T;
+    fn map_to_roslibrust(self) -> Result<T> {
+        match self {
+            Ok(t) => Ok(t),
+            Err(e) => Err(Error::IoError(std::io::Error::other(e))),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl<T: Send + Sync> MapError for std::result::Result<T, ws_stream_wasm::WsErr> {
     type T = T;
     fn map_to_roslibrust(self) -> Result<T> {
         match self {
