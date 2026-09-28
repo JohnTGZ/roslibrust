@@ -885,24 +885,12 @@ impl Client {
         let response = tokio::task::spawn_blocking(move || (callback)(&request))
             .await
             .unwrap_or_else(|e| Err(format!("Service callback panicked: {e}").into()));
+        #[cfg(target_arch = "wasm32")]
+        let response = (callback)(&request);
         // A failed write means the connection dropped; spin_once will notice and
         // trigger a reconnect, so logging is all we can usefully do here
         let write_result = match response {
             Ok(res) => writer.service_response(topic, id, true, res).await,
-            Err(e) => {
-                error!("A service callback on topic {:?} failed with {:?} sending response false in service_response", data.get("service"), e);
-                writer
-                    .service_response(topic, id, false, serde_json::json!(format!("{e}")))
-                    .await
-            }
-        };
-        #[cfg(target_arch = "wasm32")]
-        let response = (callback)(&request);
-        match response {
-            Ok(res) => {
-                // TODO unwrap here is probably bad... Failure to write means disconnected?
-                writer.service_response(topic, id, true, res).await.unwrap();
-            }
             Err(e) => {
                 error!("A service callback on topic {:?} failed with {:?} sending response false in service_response", data.get("service"), e);
                 writer
@@ -1068,7 +1056,7 @@ async fn stubborn_spin(
 // Implementation of timeout that is a no-op if timeout is 0 or un-configured
 // Only works on functions that already return our result type
 // This might not be needed but reading tokio::timeout docs I couldn't confirm this
-async fn timeout<F, T>(timeout: Option<Duration>, future: F) -> Result<T>
+pub(crate) async fn timeout<F, T>(timeout: Option<Duration>, future: F) -> Result<T>
 where
     F: futures::Future<Output = Result<T>>,
 {
