@@ -110,11 +110,13 @@ use futures_util::stream::{SplitSink, SplitStream};
 use std::collections::HashMap;
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::net::TcpStream;
+mod native_imports {
+    pub(crate) use tokio::net::TcpStream;
+    pub(crate) use tokio_tungstenite::*;
+    pub(crate) use tungstenite::Message;
+}
 #[cfg(not(target_arch = "wasm32"))]
-use tokio_tungstenite::*;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use tungstenite::Message;
+pub(crate) use native_imports::*;
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) use ws_stream_wasm::WsMessage as Message;
@@ -213,7 +215,6 @@ impl<T: RosServiceType> ServiceClient<T> {
 /// Our underlying communication socket type (maybe move to comm?)
 #[cfg(not(target_arch = "wasm32"))]
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
-
 #[cfg(target_arch = "wasm32")]
 type Socket = ws_stream_wasm::WsStream;
 
@@ -364,53 +365,96 @@ impl GraphProvider for crate::ClientHandle {
             )
             .await?;
 
-        // Spawn parallel tasks to query service types for all services
-        let probe_tasks: Vec<_> = response
-            .services
-            .into_iter()
-            .map(|service| {
-                let handle = self.clone();
-                tokio::spawn(async move {
-                    let type_name = match tokio::time::timeout(
-                        SERVICE_TYPE_QUERY_TIMEOUT,
-                        handle.call_service::<rosapi_discovery::ServiceType>(
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut services = {
+            let probe_tasks: Vec<_> = response
+                .services
+                .into_iter()
+                .map(|service| {
+                    let handle = self.clone();
+                    tokio::spawn(async move {
+                        let type_name = match tokio::time::timeout(
+                            SERVICE_TYPE_QUERY_TIMEOUT,
+                            handle.call_service::<rosapi_discovery::ServiceType>(
+                                "/rosapi/service_type",
+                                rosapi_discovery::ServiceTypeRequest {
+                                    service: service.clone(),
+                                },
+                            ),
+                        )
+                        .await
+                        {
+                            Ok(Ok(service_type)) => normalize_graph_type(service_type.type_name),
+                            Ok(Err(err)) => {
+                                log::warn!(
+                                    "Failed to resolve type for service {service}: {err}. Returning empty type."
+                                );
+                                String::new()
+                            }
+                            Err(_) => {
+                                log::warn!(
+                                    "Timed out resolving type for service {service}. Returning empty type."
+                                );
+                                String::new()
+                            }
+                        };
+                        ServiceInfo {
+                            name: service,
+                            type_name,
+                        }
+                    })
+                })
+                .collect();
+
+            // Collect results from all parallel tasks
+            let mut services = Vec::with_capacity(probe_tasks.len());
+            for task in probe_tasks {
+                if let Ok(service_info) = task.await {
+                    services.push(service_info);
+                }
+            }
+            services
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        let mut services = {
+            let probe_futures: Vec<_> = response
+                .services
+                .into_iter()
+                .map(|service| {
+                    let handle = self.clone();
+                    async move {
+                        let call_future = handle.call_service::<rosapi_discovery::ServiceType>(
                             "/rosapi/service_type",
                             rosapi_discovery::ServiceTypeRequest {
                                 service: service.clone(),
                             },
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(Ok(service_type)) => normalize_graph_type(service_type.type_name),
-                        Ok(Err(err)) => {
-                            log::warn!(
-                                "Failed to resolve type for service {service}: {err}. Returning empty type."
-                            );
-                            String::new()
+                        );
+
+                        let type_name = match crate::client::timeout(Some(SERVICE_TYPE_QUERY_TIMEOUT), call_future).await {
+                            Ok(service_type) => normalize_graph_type(service_type.type_name),
+                            Err(err) => {
+                                log::warn!(
+                                    "Failed or timed out resolving type for service {service}: {err}. Returning empty type."
+                                );
+                                String::new()
+                            }
+                        };
+                        ServiceInfo {
+                            name: service,
+                            type_name,
                         }
-                        Err(_) => {
-                            log::warn!(
-                                "Timed out resolving type for service {service}. Returning empty type."
-                            );
-                            String::new()
-                        }
-                    };
-                    ServiceInfo {
-                        name: service,
-                        type_name,
                     }
                 })
-            })
-            .collect();
+                .collect();
 
-        // Collect results from all parallel tasks
-        let mut services = Vec::with_capacity(probe_tasks.len());
-        for task in probe_tasks {
-            if let Ok(service_info) = task.await {
+            let results = futures_util::future::join_all(probe_futures).await;
+            let mut services = Vec::with_capacity(results.len());
+            for service_info in results {
                 services.push(service_info);
             }
-        }
+            services
+        };
 
         services.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(services)
