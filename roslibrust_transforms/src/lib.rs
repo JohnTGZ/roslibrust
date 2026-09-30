@@ -252,7 +252,7 @@ where
         let registry_clone = registry.clone();
         let notify_clone = transform_notify.clone();
         let cancel_clone = cancel_token.clone();
-        tokio::spawn(async move {
+        let future = async move {
             Self::process_tf_messages(
                 tf_subscriber,
                 registry_clone,
@@ -261,13 +261,23 @@ where
                 false,
             )
             .await;
-        });
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tokio::spawn(future);
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            wasm_bindgen_futures::spawn_local(future);
+        }
 
         // Spawn task to handle /tf_static messages
         let registry_clone = registry.clone();
         let notify_clone = transform_notify.clone();
         let cancel_clone = cancel_token.clone();
-        tokio::spawn(async move {
+        let future_static = async move {
             Self::process_tf_messages(
                 tf_static_subscriber,
                 registry_clone,
@@ -276,7 +286,17 @@ where
                 true,
             )
             .await;
-        });
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tokio::spawn(future_static);
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            wasm_bindgen_futures::spawn_local(future_static);
+        }
 
         Ok(TransformManager {
             registry,
