@@ -135,6 +135,15 @@ impl ClientHandle {
         Self::new_with_options(ClientHandleOptions::new(url)).await
     }
 
+    /// Whether the websocket to rosbridge is currently down.
+    ///
+    /// The client keeps reconnecting in the background and this returns `false` again once the
+    /// connection is re-established. While it returns `true`, operations such as
+    /// [ClientHandle::subscribe] and [ClientHandle::call_service] fail with [Error::Disconnected].
+    pub fn is_disconnected(&self) -> bool {
+        self.is_disconnected.load(Ordering::Relaxed)
+    }
+
     fn check_for_disconnect(&self) -> Result<()> {
         match self.is_disconnected.load(Ordering::Relaxed) {
             false => Ok(()),
